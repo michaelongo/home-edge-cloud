@@ -9,9 +9,10 @@ from fastapi import (
     UploadFile,
     File as FastAPIFile,
 )
-from fastapi.security import OAuth2PasswordRequestForm
 
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from sqlalchemy.orm import Session
 
@@ -20,7 +21,6 @@ from app import models
 
 from app.schemas import (
     UserRegister,
-    UserLogin,
     UserResponse,
     TokenResponse,
     DeviceCreate,
@@ -44,11 +44,21 @@ from app.config import settings
 from app.storage import (
     ensure_storage_directories,
     calculate_hash,
+    get_storage_status,
+    select_storage_location,
 )
 
 
+# ==================================================
+# DATABASE INITIALIZATION
+# ==================================================
+
 Base.metadata.create_all(bind=engine)
 
+
+# ==================================================
+# STORAGE INITIALIZATION
+# ==================================================
 
 ensure_storage_directories(
     settings.STORAGE_SSD_PATH,
@@ -56,20 +66,39 @@ ensure_storage_directories(
 )
 
 
+# ==================================================
+# FASTAPI APPLICATION
+# ==================================================
+
 app = FastAPI(
     title="Home Edge Cloud API",
     version="1.0.0"
 )
 
 
+# ==================================================
+# CORS
+# ==================================================
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
+
     allow_credentials=True,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
+
+# ==================================================
+# ROOT
+# ==================================================
 
 @app.get("/")
 def root():
@@ -79,6 +108,10 @@ def root():
     }
 
 
+# ==================================================
+# HEALTH
+# ==================================================
+
 @app.get("/health")
 def health():
 
@@ -87,9 +120,9 @@ def health():
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # REGISTER
-# --------------------------------------------------
+# ==================================================
 
 @app.post(
     "/register",
@@ -120,9 +153,10 @@ def register(
 
     return new_user
 
-# --------------------------------------------------
+
+# ==================================================
 # LOGIN
-# --------------------------------------------------
+# ==================================================
 
 @app.post(
     "/login",
@@ -139,6 +173,7 @@ def login(
     )
 
     if not existing_user:
+
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password"
@@ -148,6 +183,7 @@ def login(
         form_data.password,
         existing_user.password_hash
     ):
+
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password"
@@ -161,10 +197,12 @@ def login(
         "access_token": token,
         "token_type": "bearer"
     }
-# --------------------------------------------------
+
+
+# ==================================================
 # OAUTH2 TOKEN ENDPOINT
-# Used by Swagger UI
-# --------------------------------------------------
+# Used by Swagger Authorize
+# ==================================================
 
 @app.post(
     "/token",
@@ -205,9 +243,11 @@ def token_login(
         "access_token": access_token,
         "token_type": "bearer"
     }
-# --------------------------------------------------
+
+
+# ==================================================
 # CURRENT USER
-# --------------------------------------------------
+# ==================================================
 
 @app.get(
     "/me",
@@ -233,9 +273,9 @@ def get_me(
     return user
 
 
-# --------------------------------------------------
+# ==================================================
 # TRUSTED DEVICES
-# --------------------------------------------------
+# ==================================================
 
 @app.post(
     "/devices",
@@ -288,11 +328,17 @@ def add_device(
     )
 
     db.add(new_device)
+
     db.commit()
+
     db.refresh(new_device)
 
     return new_device
 
+
+# ==================================================
+# GET TRUSTED DEVICES
+# ==================================================
 
 @app.get(
     "/devices",
@@ -312,38 +358,22 @@ def get_devices(
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # STORAGE STATUS
-# --------------------------------------------------
-
-# --------------------------------------------------
-# STORAGE STATUS
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/storage/status")
-def storage_status(
-    user_id: int = Depends(get_current_user_id)
-):
+def storage_status():
 
-    ssd = Path(
-        settings.STORAGE_SSD_PATH
-    )
-
-    hdd = Path(
+    return get_storage_status(
+        settings.STORAGE_SSD_PATH,
         settings.STORAGE_HDD_PATH
     )
 
-    return {
-        "ssd_online": ssd.exists(),
-        "hdd_online": hdd.exists(),
-        "ssd_path": str(ssd),
-        "hdd_path": str(hdd)
-    }
 
-
-# --------------------------------------------------
-# UPLOAD
-# --------------------------------------------------
+# ==================================================
+# UPLOAD FILE
+# ==================================================
 
 @app.post("/files/upload")
 async def upload_file(
@@ -352,9 +382,18 @@ async def upload_file(
     db: Session = Depends(get_db)
 ):
 
+    # ----------------------------------------------
+    # READ FILE
+    # ----------------------------------------------
+
     contents = await upload.read()
 
     file_size = len(contents)
+
+
+    # ----------------------------------------------
+    # FIND USER
+    # ----------------------------------------------
 
     user = get_user_by_id(
         db,
@@ -368,6 +407,11 @@ async def upload_file(
             detail="User not found"
         )
 
+
+    # ----------------------------------------------
+    # CHECK USER QUOTA
+    # ----------------------------------------------
+
     if file_size > user.remaining_storage:
 
         raise HTTPException(
@@ -375,64 +419,150 @@ async def upload_file(
             detail="Storage quota exceeded"
         )
 
+
+    # ----------------------------------------------
+    # CREATE SAFE UNIQUE FILE NAME
+    # ----------------------------------------------
+
     safe_name = (
         f"{uuid.uuid4().hex}_"
         f"{Path(upload.filename).name}"
     )
 
-    ssd_file = (
-        Path(settings.STORAGE_SSD_PATH)
-        / safe_name
+
+    # ----------------------------------------------
+    # SELECT STORAGE LOCATION
+    #
+    # Policy:
+    # 1. Prefer SSD
+    # 2. Fall back to HDD
+    # 3. Fail if neither is available
+    # ----------------------------------------------
+
+    storage_location = select_storage_location(
+        file_size,
+        settings.STORAGE_SSD_PATH,
+        settings.STORAGE_HDD_PATH
     )
 
-    hdd_file = (
-        Path(settings.STORAGE_HDD_PATH)
-        / safe_name
+
+    if storage_location is None:
+
+        raise HTTPException(
+            status_code=507,
+            detail="No storage location has enough free space"
+        )
+
+
+    storage_class = storage_location["location"]
+
+    storage_directory = storage_location["path"]
+
+
+    stored_file = (
+        storage_directory /
+        safe_name
     )
 
-    with open(ssd_file, "wb") as file:
 
-        file.write(contents)
+    # ----------------------------------------------
+    # WRITE FILE
+    # ----------------------------------------------
+
+    try:
+
+        with open(
+            stored_file,
+            "wb"
+        ) as file:
+
+            file.write(contents)
+
+    except OSError as error:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to write file: {error}"
+        )
+
+
+    # ----------------------------------------------
+    # CALCULATE SHA-256
+    # ----------------------------------------------
 
     file_hash = calculate_hash(
-        str(ssd_file)
+        str(stored_file)
     )
 
-    os.replace(
-        str(ssd_file),
-        str(hdd_file)
-    )
+
+    # ----------------------------------------------
+    # CREATE DATABASE RECORD
+    # ----------------------------------------------
 
     new_file = models.File(
         owner_id=user_id,
         filename=upload.filename,
         size=file_size,
         file_hash=file_hash,
-        storage_class="STANDARD",
+        storage_class=storage_class,
         status="STORED",
-        storage_path=str(hdd_file)
+        storage_path=str(stored_file)
     )
+
 
     db.add(new_file)
 
+
+    # ----------------------------------------------
+    # UPDATE USER STORAGE
+    # ----------------------------------------------
+
     user.used_storage += file_size
+
     user.remaining_storage -= file_size
 
+
+    # ----------------------------------------------
+    # SAVE DATABASE
+    # ----------------------------------------------
+
     db.commit()
+
     db.refresh(new_file)
 
+
+    # ----------------------------------------------
+    # RESPONSE
+    # ----------------------------------------------
+
     return {
-        "message": "File uploaded successfully",
-        "file_id": new_file.id,
-        "filename": new_file.filename,
-        "size": new_file.size,
-        "sha256": file_hash
+
+        "message":
+            "File uploaded successfully",
+
+        "file_id":
+            new_file.id,
+
+        "filename":
+            new_file.filename,
+
+        "size":
+            new_file.size,
+
+        "storage_class":
+            new_file.storage_class,
+
+        "storage_path":
+            new_file.storage_path,
+
+        "sha256":
+            file_hash
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # LIST FILES
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/files")
 def list_files(
@@ -448,27 +578,41 @@ def list_files(
         .all()
     )
 
+
     return [
+
         {
-            "id": file.id,
-            "filename": file.filename,
-            "size": file.size,
-            "storage_class": file.storage_class,
-            "status": file.status,
-            "created_at": file.created_at
+            "id":
+                file.id,
+
+            "filename":
+                file.filename,
+
+            "size":
+                file.size,
+
+            "storage_class":
+                file.storage_class,
+
+            "status":
+                file.status,
+
+            "created_at":
+                file.created_at
         }
+
         for file in files
+
     ]
 
 
-# --------------------------------------------------
-# DOWNLOAD
-# --------------------------------------------------
+# ==================================================
+# DOWNLOAD FILE
+# ==================================================
 
-from fastapi.responses import FileResponse
-
-
-@app.get("/files/{file_id}/download")
+@app.get(
+    "/files/{file_id}/download"
+)
 def download_file(
     file_id: int,
     user_id: int = Depends(get_current_user_id),
@@ -484,12 +628,14 @@ def download_file(
         .first()
     )
 
+
     if not file:
 
         raise HTTPException(
             status_code=404,
             detail="File not found"
         )
+
 
     if not file.storage_path:
 
@@ -498,12 +644,16 @@ def download_file(
             detail="Storage path unavailable"
         )
 
-    if not os.path.exists(file.storage_path):
+
+    if not os.path.exists(
+        file.storage_path
+    ):
 
         raise HTTPException(
             status_code=404,
             detail="Physical file not found"
         )
+
 
     return FileResponse(
         path=file.storage_path,
@@ -511,11 +661,13 @@ def download_file(
     )
 
 
-# --------------------------------------------------
-# DELETE
-# --------------------------------------------------
+# ==================================================
+# DELETE FILE
+# ==================================================
 
-@app.delete("/files/{file_id}")
+@app.delete(
+    "/files/{file_id}"
+)
 def delete_file(
     file_id: int,
     user_id: int = Depends(get_current_user_id),
@@ -531,6 +683,7 @@ def delete_file(
         .first()
     )
 
+
     if not file:
 
         raise HTTPException(
@@ -538,23 +691,52 @@ def delete_file(
             detail="File not found"
         )
 
-    if file.storage_path and os.path.exists(
+
+    # ----------------------------------------------
+    # DELETE PHYSICAL FILE
+    # ----------------------------------------------
+
+    if (
         file.storage_path
+        and
+        os.path.exists(file.storage_path)
     ):
 
-        os.remove(file.storage_path)
+        os.remove(
+            file.storage_path
+        )
+
+
+    # ----------------------------------------------
+    # UPDATE USER QUOTA
+    # ----------------------------------------------
 
     user = get_user_by_id(
         db,
         user_id
     )
 
-    user.used_storage -= file.size
-    user.remaining_storage += file.size
+
+    if user:
+
+        user.used_storage = max(
+            0,
+            user.used_storage - file.size
+        )
+
+        user.remaining_storage += file.size
+
+
+    # ----------------------------------------------
+    # DELETE DATABASE RECORD
+    # ----------------------------------------------
 
     db.delete(file)
+
     db.commit()
 
+
     return {
-        "message": "File deleted successfully"
+        "message":
+            "File deleted successfully"
     }
