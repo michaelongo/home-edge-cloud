@@ -2,8 +2,16 @@ from pydantic import BaseModel, Field
 
 
 class UserRegister(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=8, max_length=72)
+    username: str = Field(
+        min_length=3,
+        max_length=50
+    )
+
+    password: str = Field(
+        min_length=8,
+        max_length=72
+    )
+
 
 class UserLogin(BaseModel):
     username: str
@@ -27,6 +35,18 @@ class TokenResponse(BaseModel):
 
 
 class DeviceCreate(BaseModel):
-    device_name: str = Field(min_length=1, max_length=100)
-    device_type: str = Field(min_length=1, max_length=50)
-    device_identifier: str = Field(min_length=10, max_length=200)
+    device_name: str
+    device_type: str
+    device_identifier: str
+
+
+class DeviceResponse(BaseModel):
+    id: int
+    device_name: str
+    device_type: str
+    device_identifier: str
+    trusted: bool
+    vault_enabled: bool
+
+    class Config:
+        from_attributes = True
