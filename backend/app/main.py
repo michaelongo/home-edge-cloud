@@ -348,6 +348,7 @@ def get_devices(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
+        
 
     return (
         db.query(models.TrustedDevice)
@@ -357,6 +358,41 @@ def get_devices(
         .all()
     )
 
+# --------------------------------------------------
+# REMOVE TRUSTED DEVICE
+# --------------------------------------------------
+
+@app.delete("/devices/{device_id}")
+def remove_device(
+    device_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+
+    device = (
+        db.query(models.TrustedDevice)
+        .filter(
+            models.TrustedDevice.id == device_id,
+            models.TrustedDevice.user_id == user_id
+        )
+        .first()
+    )
+
+    if not device:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Device not found"
+        )
+
+    db.delete(device)
+
+    db.commit()
+
+    return {
+        "message": "Trusted device removed successfully",
+        "device_id": device_id
+    }
 
 # ==================================================
 # STORAGE STATUS
@@ -370,7 +406,44 @@ def storage_status():
         settings.STORAGE_HDD_PATH
     )
 
+# --------------------------------------------------
+# STORAGE QUOTA
+# --------------------------------------------------
+# --------------------------------------------------
+# STORAGE QUOTA
+# --------------------------------------------------
 
+@app.get("/storage/quota")
+def storage_quota(
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+
+    user = get_user_by_id(
+        db,
+        user_id
+    )
+
+    if not user:
+
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    quota = user.quota
+    used = user.used_storage
+
+    remaining = max(
+        quota - used,
+        0
+    )
+
+    return {
+        "quota": quota,
+        "used_storage": used,
+        "remaining_storage": remaining
+    }
 # ==================================================
 # UPLOAD FILE
 # ==================================================

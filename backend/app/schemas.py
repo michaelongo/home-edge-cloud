@@ -19,16 +19,18 @@ class UserLogin(BaseModel):
 
 
 class UserResponse(BaseModel):
+
     id: int
+
     username: str
-    quota: int
+
     used_storage: int
+
     remaining_storage: int
 
-    class Config:
-        from_attributes = True
-
-
+    model_config = {
+        "from_attributes": True
+    }
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
