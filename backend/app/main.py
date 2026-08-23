@@ -362,6 +362,10 @@ def get_devices(
 # REMOVE TRUSTED DEVICE
 # --------------------------------------------------
 
+# --------------------------------------------------
+# REMOVE TRUSTED DEVICE
+# --------------------------------------------------
+
 @app.delete("/devices/{device_id}")
 def remove_device(
     device_id: int,
@@ -382,29 +386,30 @@ def remove_device(
 
         raise HTTPException(
             status_code=404,
-            detail="Device not found"
+            detail="Trusted device not found"
         )
 
     db.delete(device)
-
     db.commit()
 
     return {
-        "message": "Trusted device removed successfully",
-        "device_id": device_id
+        "message": "Trusted device removed successfully"
     }
-
 # ==================================================
 # STORAGE STATUS
 # ==================================================
 
 @app.get("/storage/status")
-def storage_status():
+def storage_status(
+    user_id: int = Depends(get_current_user_id)
+):
 
-    return get_storage_status(
+    status = get_storage_status(
         settings.STORAGE_SSD_PATH,
         settings.STORAGE_HDD_PATH
     )
+
+    return status
 
 # --------------------------------------------------
 # STORAGE QUOTA
@@ -504,20 +509,15 @@ async def upload_file(
 
 
     # ----------------------------------------------
+      # --------------------------------------------------
     # SELECT STORAGE LOCATION
-    #
-    # Policy:
-    # 1. Prefer SSD
-    # 2. Fall back to HDD
-    # 3. Fail if neither is available
-    # ----------------------------------------------
+    # --------------------------------------------------
 
     storage_location = select_storage_location(
         file_size,
         settings.STORAGE_SSD_PATH,
         settings.STORAGE_HDD_PATH
     )
-
 
     if storage_location is None:
 
@@ -526,51 +526,37 @@ async def upload_file(
             detail="No storage location has enough free space"
         )
 
-
     storage_class = storage_location["location"]
 
     storage_directory = storage_location["path"]
-
 
     stored_file = (
         storage_directory /
         safe_name
     )
 
+    # --------------------------------------------------
+    # STORE FILE
+    # --------------------------------------------------
 
-    # ----------------------------------------------
-    # WRITE FILE
-    # ----------------------------------------------
+    with open(
+        stored_file,
+        "wb"
+    ) as file:
 
-    try:
+        file.write(contents)
 
-        with open(
-            stored_file,
-            "wb"
-        ) as file:
-
-            file.write(contents)
-
-    except OSError as error:
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unable to write file: {error}"
-        )
-
-
-    # ----------------------------------------------
+    # --------------------------------------------------
     # CALCULATE SHA-256
-    # ----------------------------------------------
+    # --------------------------------------------------
 
     file_hash = calculate_hash(
         str(stored_file)
     )
 
-
-    # ----------------------------------------------
-    # CREATE DATABASE RECORD
-    # ----------------------------------------------
+    # --------------------------------------------------
+    # DATABASE RECORD
+    # --------------------------------------------------
 
     new_file = models.File(
         owner_id=user_id,
@@ -582,54 +568,24 @@ async def upload_file(
         storage_path=str(stored_file)
     )
 
-
     db.add(new_file)
-
-
-    # ----------------------------------------------
-    # UPDATE USER STORAGE
-    # ----------------------------------------------
 
     user.used_storage += file_size
 
     user.remaining_storage -= file_size
 
-
-    # ----------------------------------------------
-    # SAVE DATABASE
-    # ----------------------------------------------
-
     db.commit()
 
     db.refresh(new_file)
 
-
-    # ----------------------------------------------
-    # RESPONSE
-    # ----------------------------------------------
-
     return {
-
-        "message":
-            "File uploaded successfully",
-
-        "file_id":
-            new_file.id,
-
-        "filename":
-            new_file.filename,
-
-        "size":
-            new_file.size,
-
-        "storage_class":
-            new_file.storage_class,
-
-        "storage_path":
-            new_file.storage_path,
-
-        "sha256":
-            file_hash
+        "message": "File uploaded successfully",
+        "file_id": new_file.id,
+        "filename": new_file.filename,
+        "size": new_file.size,
+        "sha256": file_hash,
+        "storage_class": storage_class,
+        "storage_path": str(stored_file)
     }
 
 
@@ -733,7 +689,62 @@ def download_file(
         filename=file.filename
     )
 
+# --------------------------------------------------
+# VERIFY FILE INTEGRITY
+# --------------------------------------------------
 
+@app.get("/files/{file_id}/verify")
+def verify_file_integrity(
+    file_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+
+    file = (
+        db.query(models.File)
+        .filter(
+            models.File.id == file_id,
+            models.File.owner_id == user_id
+        )
+        .first()
+    )
+
+    if not file:
+
+        raise HTTPException(
+            status_code=404,
+            detail="File not found"
+        )
+
+    if not file.storage_path:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Storage path unavailable"
+        )
+
+    if not os.path.exists(file.storage_path):
+
+        raise HTTPException(
+            status_code=404,
+            detail="Physical file not found"
+        )
+
+    current_hash = calculate_hash(
+        file.storage_path
+    )
+
+    is_valid = (
+        current_hash == file.file_hash
+    )
+
+    return {
+        "file_id": file.id,
+        "filename": file.filename,
+        "stored_hash": file.file_hash,
+        "current_hash": current_hash,
+        "valid": is_valid
+    }
 # ==================================================
 # DELETE FILE
 # ==================================================
