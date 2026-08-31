@@ -207,7 +207,3 @@ Documentation
 - [`docs/cloud-concepts.md`](docs/cloud-concepts.md): cloud and edge-computing concepts demonstrated
 - [`docs/database.md`](docs/database.md): current data model notes
 - [`docs/research.md`](docs/research.md): research and design notes
-
-License
-
-No license has been selected for this project yet. Until a license is added, all rights are reserved by the repository owner.
